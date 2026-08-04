@@ -38,12 +38,17 @@ class ASRService:
     def transcribe(self, audio_path: str) -> str:
         """
         Transcrit un fichier audio en texte.
-        
+        Supporte les fichiers de toute durée grâce au découpage en segments de 30s.
+
         Args:
             audio_path: Chemin vers le fichier audio
-            
+
         Returns:
             Texte transcrit
         """
-        result = self._pipeline(audio_path)
+        result = self._pipeline(
+            audio_path,
+            return_timestamps=True,
+            chunk_length_s=30,
+        )
         return result["text"].strip()

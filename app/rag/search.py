@@ -112,12 +112,20 @@ class RAGSearch:
             if categorie == "Conforme / Bon état" and ("défaut" in rule or "endommagé" in rule):
                 return "À vérifier - Incohérence"
         
+        # Hors garantie / refus explicite
+        if any(kw in rule for kw in [
+            "hors garantie", "n'est plus couvert", "aucun remboursement ou échange gratuit",
+            "ne peut plus être retourné", "pas droit", "n'est plus éligible",
+            "réparation payante",
+        ]):
+            return "Refusé - Hors garantie"
+
         # Logique basée sur les règles
         if "remboursable" in rule or "remboursement" in rule:
             return "Remboursable"
-        if "ne peut plus être retourné" in rule or "pas droit" in rule:
-            return "Refusé"
         if "échangeable" in rule or "échange" in rule:
             return "Échangeable"
-        
+        if "devis" in rule or "réparation" in rule:
+            return "Réparation proposée"
+
         return "À vérifier"
