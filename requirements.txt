@@ -1,9 +1,8 @@
-fastapi
-uvicorn[standard]
-python-multipart
-transformers
-torch
-numpy
-pillow
-sentence-transformers
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+python-multipart==0.0.32
+transformers==5.14.1
+torch==2.13.0
+numpy==2.5.1
+pillow==12.3.0
 python-dotenv

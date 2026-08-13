@@ -1,20 +1,34 @@
 """
-Routes pour le support ticket.
-Gère les endpoints de l'API.
+POST /support-ticket — endpoint unique d'ingestion multimodal.
+Accepte un audio (.mp3, .wav), une image (.png, .jpg, .jpeg) et/ou un texte.
 """
 
 import os
+import shutil
+import tempfile
 from typing import Optional
-from fastapi import APIRouter, File, UploadFile, Form
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
-from app.services.asr_service import ASRService
-from app.services.vision_service import VisionService
-from app.rag.search import RAGSearch
-from app.utils.file_utils import save_temp_file, cleanup_temp_files
-from app.utils.file_utils import ALLOWED_AUDIO, ALLOWED_IMAGE
+from app.services import asr_service, vision_service
+from app.rag import search
+from app.rag.search import is_relevant
 
-router = APIRouter()
+router = APIRouter(tags=["Support"])
+
+ALLOWED_AUDIO = {".mp3", ".wav", ".webm", ".ogg"}
+ALLOWED_IMAGE = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def _save_tmp(upload: UploadFile) -> str:
+    """Sauvegarde un fichier uploadé dans un fichier temporaire et retourne son chemin."""
+    suffix = os.path.splitext(upload.filename)[1].lower()
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    with tmp:
+        shutil.copyfileobj(upload.file, tmp)
+    return tmp.name
+
 
 @router.post("/support-ticket")
 async def support_ticket(
@@ -22,69 +36,78 @@ async def support_ticket(
     image: Optional[UploadFile] = File(None),
     description: Optional[str] = Form(None),
 ):
-    """
-    Endpoint principal pour le traitement d'un ticket support.
-    Accepte un fichier audio, une image et une description textuelle.
-    """
     tmp_files = []
     transcribed_text = None
     vision_diagnosis = None
 
     try:
-        # --- Traitement Audio (ASR) ---
+        # 1. Transcription audio (ASR)
         if audio is not None:
             ext = os.path.splitext(audio.filename)[1].lower()
             if ext not in ALLOWED_AUDIO:
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": f"Format audio non supporté: {ext}"}
-                )
-            
-            path = save_temp_file(audio)
+                raise HTTPException(status_code=400, detail=f"Format audio non supporté : {ext}. Formats acceptés : {ALLOWED_AUDIO}")
+            path = _save_tmp(audio)
             tmp_files.append(path)
-            asr_service = ASRService()
             transcribed_text = asr_service.transcribe(path)
 
-        # --- Traitement Visuel (CLIP) ---
+        # 2. Analyse image (Vision)
         if image is not None:
             ext = os.path.splitext(image.filename)[1].lower()
             if ext not in ALLOWED_IMAGE:
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": f"Format image non supporté: {ext}"}
-                )
-            
-            path = save_temp_file(image)
+                raise HTTPException(status_code=400, detail=f"Format image non supporté : {ext}. Formats acceptés : {ALLOWED_IMAGE}")
+            path = _save_tmp(image)
             tmp_files.append(path)
-            vision_service = VisionService()
             vision_diagnosis = vision_service.analyze_image(path)
 
-        # --- Recherche RAG ---
-        query_text = transcribed_text or description or ""
-        rag_search = RAGSearch()
-        matched_rule, similarity = rag_search.search(query_text)
-        
-        # --- Proposition de statut ---
-        status = rag_search.propose_status(
-            matched_rule, 
-            similarity, 
-            vision_diagnosis
-        )
+        # 3. Recherche RAG
+        query = transcribed_text or description or ""
+        if not query.strip():
+            return {
+                "transcribed_text": None,
+                "vision_diagnosis": vision_diagnosis,
+                "matched_policy": None,
+                "similarity_score": 0.0,
+                "proposed_status": "À vérifier - Aucun texte fourni",
+            }
+
+        if not is_relevant(query):
+            return {
+                "transcribed_text": transcribed_text,
+                "vision_diagnosis": vision_diagnosis,
+                "matched_policy": None,
+                "similarity_score": 0.0,
+                "proposed_status": "Hors sujet - Contenu non lié au support client",
+            }
+
+        # Détection prioritaire : dommage causé par l'utilisateur
+        if search.is_user_fault(query):
+            return {
+                "transcribed_text": transcribed_text,
+                "vision_diagnosis": vision_diagnosis,
+                "matched_policy": "Un produit cassé ou endommagé par l'utilisateur lui-même n'est pas éligible au remboursement ni à l'échange.",
+                "similarity_score": 1.0,
+                "proposed_status": "Refusé - Dommage causé par l'utilisateur",
+            }
+
+        matched_rule, similarity = search.search(query)
+
+        # 4. Statut proposé
+        proposed_status = search.propose_status(matched_rule, similarity, vision_diagnosis, query)
 
         return {
             "transcribed_text": transcribed_text,
             "vision_diagnosis": vision_diagnosis,
             "matched_policy": matched_rule or None,
             "similarity_score": round(similarity, 3),
-            "proposed_status": status,
+            "proposed_status": proposed_status,
         }
 
+    except HTTPException:
+        raise
     except Exception as exc:
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Erreur serveur: {str(exc)}"}
-        )
+        return JSONResponse(status_code=500, content={"error": str(exc)})
 
     finally:
-        # Nettoyage des fichiers temporaires
-        cleanup_temp_files(tmp_files)
+        for path in tmp_files:
+            if os.path.exists(path):
+                os.remove(path)
